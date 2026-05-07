@@ -87,7 +87,6 @@ jobs:
   check-labels:
     if: github.event_name != 'schedule' || github.repository == 'apache/arrow'
     uses: ./.github/workflows/check_labels.yml
-    secrets: inherit
     with:
       parent-workflow: cpp_extra
 
@@ -107,6 +106,16 @@ jobs:
           - image: alpine-linux-cpp
             runs-on: ubuntu-latest
             title: AMD64 Alpine Linux
+          - image: ubuntu-cpp
+            run-options: >-
+              -e ARROW_CTEST_TIMEOUT=2000
+              -e ARROW_C_FLAGS_DEBUG="-O1"
+              -e ARROW_CXX_FLAGS_DEBUG="-O1"
+              -e ARROW_GANDIVA=OFF
+              -e ARROW_LARGE_MEMORY_TESTS=ON
+              -e BUILD_WARNING_LEVEL=PRODUCTION
+            runs-on: "runs-on=${{ github.run_id }}/family=x8i.2xlarge/volume=80gb/spot=capacity-optimized"
+            title: AMD64 Ubuntu Large Memory Tests
           - image: conda-cpp
             run-options: >-
               -e ARROW_USE_MESON=ON
@@ -129,6 +138,7 @@ jobs:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Cache Docker Volumes
@@ -211,6 +221,7 @@ jobs:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Free up disk space
@@ -263,6 +274,7 @@ jobs:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Install dependencies
@@ -336,10 +348,10 @@ jobs:
           cd cpp/examples/minimal_build
           ../minimal_build.build/arrow-example
 
-  odbc-macos:
+  odbc-linux:
     needs: check-labels
-    name: ODBC ${{ matrix.architecture }} macOS ${{ matrix.macos-version }}
-    runs-on: macos-${{ matrix.macos-version }}
+    name: ODBC Linux
+    runs-on: ubuntu-latest
     if: >-
       needs.check-labels.outputs.force == 'true' ||
       contains(fromJSON(needs.check-labels.outputs.ci-extra-labels || '[]'), 'CI: Extra') ||
@@ -347,25 +359,103 @@ jobs:
     timeout-minutes: 75
     strategy:
       fail-fast: false
+    env:
+      ARCH: amd64
+      ARCHERY_DEBUG: 1
+      ARROW_ENABLE_TIMING_TESTS: OFF
+      DOCKER_VOLUME_PREFIX: ".docker/"
+      UBUNTU: 24.04
+    steps:
+      - name: Checkout Arrow
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: recursive
+      - name: Cache Docker Volumes
+        uses: actions/cache@v5
+        with:
+          path: .docker
+          key: ubuntu-cpp-odbc-${{ hashFiles('cpp/**') }}
+          restore-keys: ubuntu-cpp-odbc-
+      - name: Setup Python on hosted runner
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3
+      - name: Setup Archery
+        run: python3 -m pip install -e dev/archery[docker]
+      - name: Execute Docker Build
+        env:
+          ARCHERY_DOCKER_USER: ${{ secrets.DOCKERHUB_USER }}
+          ARCHERY_DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # GH-40558: reduce ASLR to avoid ASAN/LSAN crashes
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          source ci/scripts/util_enable_core_dumps.sh
+          archery docker run ubuntu-cpp-odbc
+      - name: Docker Push
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.repository == 'apache/arrow' &&
+          github.ref_name == 'main'
+        env:
+          ARCHERY_DOCKER_USER: ${{ secrets.DOCKERHUB_USER }}
+          ARCHERY_DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
+        run: archery docker push ubuntu-cpp-odbc
+
+  odbc-macos:
+    needs: check-labels
+    name: ODBC ${{ matrix.build-type }} ${{ matrix.architecture }} macOS ${{ matrix.macos-version }}
+    runs-on: macos-${{ matrix.macos-version }}
+    if: >-
+      needs.check-labels.outputs.force == 'true' ||
+      contains(fromJSON(needs.check-labels.outputs.ci-extra-labels || '[]'), 'CI: Extra') ||
+      contains(fromJSON(needs.check-labels.outputs.ci-extra-labels || '[]'), 'CI: Extra: C++')
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
       matrix:
         include:
-          - architecture: AMD64
-            macos-version: "15-intel"
-          - architecture: ARM64
-            macos-version: "14"
+          - { architecture: AMD64, macos-version: "15-intel", build-type : debug }
+          - { architecture: AMD64, macos-version: "15-intel", build-type : release }
+          - { architecture: ARM64, macos-version: "14", build-type : debug }
+          - { architecture: ARM64, macos-version: "14", build-type : release }
     env:
       ARROW_BUILD_TESTS: ON
+      ARROW_BUILD_TYPE: ${{ matrix.build-type }}
+      ARROW_DEPENDENCY_SOURCE: BUNDLED
+      ARROW_DEPENDENCY_USE_SHARED: OFF
       ARROW_FLIGHT_SQL_ODBC: ON
       ARROW_HOME: /tmp/local
+      ARROW_MIMALLOC: OFF
     steps:
       - name: Checkout Arrow
         uses: actions/checkout@v6.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Install Dependencies
         run: |
           brew bundle --file=cpp/Brewfile
+          
+          # We want to use bundled RE2 for static linking. If
+          # Homebrew's RE2 is installed, its header file may be used.
+          # We uninstall Homebrew's RE2 to ensure using bundled RE2.
+          brew uninstall grpc || : # gRPC depends on RE2
+          brew uninstall grpc@1.54 || : # gRPC 1.54 may be installed too
+          brew uninstall re2
+
+          # We want to use bundled Protobuf for static linking. If
+          # Homebrew's Protobuf is installed, its library file may be
+          # used on test  We uninstall Homebrew's Protobuf to ensure using
+          # bundled Protobuf.
+          brew uninstall protobuf
+
+          # We want to use bundled Boost for static linking.
+          brew uninstall boost
       - name: Setup ccache
         run: |
           ci/scripts/ccache_setup.sh
@@ -377,8 +467,8 @@ jobs:
         uses: actions/cache@v5.0.2
         with:
           path: ${{ steps.ccache-info.outputs.cache-dir }}
-          key: cpp-odbc-ccache-macos-${{ matrix.macos-version }}-${{ hashFiles('cpp/**') }}
-          restore-keys: cpp-odbc-ccache-macos-${{ matrix.macos-version }}-
+          key: cpp-odbc-ccache-macos-${{ matrix.macos-version }}-${{ matrix.build-type }}-${{ hashFiles('cpp/**') }}
+          restore-keys: cpp-odbc-ccache-macos-${{ matrix.macos-version }}-${{ matrix.build-type }}-
       - name: Build
         run: |
           # Homebrew uses /usr/local as prefix. So packages
@@ -395,15 +485,36 @@ jobs:
           export ARROW_CMAKE_ARGS="-DODBC_INCLUDE_DIR=$ODBC_INCLUDE_DIR"
           export CXXFLAGS="$CXXFLAGS -I$ODBC_INCLUDE_DIR"
           ci/scripts/cpp_build.sh $(pwd) $(pwd)/build
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3
+      - name: Setup Archery
+        run: python3 -m pip install -e dev/archery
+      - name: Check ODBC Dependency
+        run: |
+          # ODBC dependency should not include other Arrow or third party libraries
+          archery linking check-dependencies \
+            --allow CoreFoundation \
+            --allow libSystem \
+            --allow libarrow_flight_sql_odbc \
+            --allow libc++ \
+            --allow libiconv \
+            --allow libresolv \
+            --allow libz \
+            "$(pwd)/build/cpp/${{ matrix.build-type }}/libarrow_flight_sql_odbc.dylib"
       - name: Register Flight SQL ODBC Driver
         run: |
-          sudo cpp/src/arrow/flight/sql/odbc/install/mac/install_odbc.sh $(pwd)/build/cpp/debug/libarrow_flight_sql_odbc.dylib
+          sudo cpp/src/arrow/flight/sql/odbc/install/unix/install_odbc.sh $(pwd)/build/cpp/${{ matrix.build-type }}/libarrow_flight_sql_odbc.dylib
       - name: Test
         shell: bash
         run: |
           sudo sysctl -w kern.coredump=1
           sudo sysctl -w kern.corefile=/tmp/core.%N.%P
           ulimit -c unlimited  # must enable within the same shell
+          # Give CI write access for system DSN
+          sudo mkdir -p /Library/ODBC
+          sudo chown -R $USER /Library/ODBC
           ci/scripts/cpp_test.sh $(pwd) $(pwd)/build
 
   odbc-msvc:
@@ -445,6 +556,7 @@ jobs:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Download Timezone Database
@@ -472,6 +584,7 @@ jobs:
       - name: Checkout vcpkg
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           path: vcpkg
           repository: microsoft/vcpkg
@@ -530,7 +643,7 @@ jobs:
           cd build/cpp
           cpack
       - name: Upload the artifacts to the job
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: flight-sql-odbc-msi-installer
           path: build/cpp/Apache-Arrow-Flight-SQL-ODBC-*-win64.msi
@@ -578,7 +691,7 @@ jobs:
     if: github.event_name == 'schedule' && github.repository == 'apache/arrow'
     steps:
       - name: Download the artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: flight-sql-odbc-msi-installer
       - name: Prepare ODBC installer for sync
@@ -599,6 +712,7 @@ jobs:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           path: arrow
           repository: apache/arrow
@@ -629,10 +743,11 @@ jobs:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Download the artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: flight-sql-odbc-msi-installer
       - name: Wait for creating GitHub Release
@@ -657,8 +772,11 @@ jobs:
       - jni-linux
       - jni-macos
       - msvc-arm64
+      - odbc-linux
       - odbc-macos
       - odbc-msvc
       - odbc-nightly
     uses: ./.github/workflows/report_ci.yml
-    secrets: inherit
+    secrets:
+      ARROW_SMTP_PASSWORD: ${{ secrets.ARROW_SMTP_PASSWORD }}
+      ARROW_ZULIP_WEBHOOK: ${{ secrets.ARROW_ZULIP_WEBHOOK }}

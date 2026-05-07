@@ -64,19 +64,20 @@ concurrency:
 
 permissions:
   actions: read
-  # Upload to GitHub Release
-  contents: write
+  contents: read
   pull-requests: read
 
 jobs:
   check-labels:
     if: github.event_name != 'schedule' || github.repository == 'apache/arrow'
     uses: ./.github/workflows/check_labels.yml
-    secrets: inherit
     with:
       parent-workflow: package_linux
 
   package:
+    permissions:
+      # Upload to GitHub Release
+      contents: write
     name: ${{ matrix.id }}
     runs-on: ${{ contains(matrix.id, 'amd64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     needs: check-labels
@@ -84,7 +85,7 @@ jobs:
       needs.check-labels.outputs.force == 'true' ||
       contains(fromJSON(needs.check-labels.outputs.ci-extra-labels || '[]'), 'CI: Extra') ||
       contains(fromJSON(needs.check-labels.outputs.ci-extra-labels || '[]'), 'CI: Extra: Package: Linux')
-    timeout-minutes: 75
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -109,12 +110,15 @@ jobs:
           - ubuntu-jammy-arm64
           - ubuntu-noble-amd64
           - ubuntu-noble-arm64
+          - ubuntu-resolute-amd64
+          - ubuntu-resolute-arm64
     env:
       DOCKER_VOLUME_PREFIX: ".docker/"
     steps:
       - name: Checkout Arrow
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
       - name: Free up disk space
@@ -218,7 +222,7 @@ jobs:
           rake version:update
           popd
       - name: Login to GitHub Container registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -279,7 +283,7 @@ jobs:
           tar cvzf ${{ matrix.id }}.tar.gz ${DISTRIBUTION}
           dev/release/utils-generate-checksum.sh ${{ matrix.id }}.tar.gz
       - name: Upload the artifacts to the job
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.id }}
           path: ${{ matrix.id }}.tar.gz*
@@ -330,4 +334,6 @@ jobs:
     needs:
       - package
     uses: ./.github/workflows/report_ci.yml
-    secrets: inherit
+    secrets:
+      ARROW_SMTP_PASSWORD: ${{ secrets.ARROW_SMTP_PASSWORD }}
+      ARROW_ZULIP_WEBHOOK: ${{ secrets.ARROW_ZULIP_WEBHOOK }}

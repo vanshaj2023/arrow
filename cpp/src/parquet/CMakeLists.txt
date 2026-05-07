@@ -151,6 +151,7 @@ endif()
 # Library config
 
 set(PARQUET_SRCS
+    arrow/fuzz_encoding_internal.cc
     arrow/fuzz_internal.cc
     arrow/path_internal.cc
     arrow/reader.cc
@@ -415,6 +416,7 @@ add_parquet_test(arrow-metadata-test SOURCES arrow/arrow_metadata_test.cc
 if(PARQUET_REQUIRE_ENCRYPTION)
   add_parquet_test(encryption-test
                    SOURCES
+                   encryption/bloom_filter_encryption_test.cc
                    encryption/encryption_internal_test.cc
                    encryption/write_configurations_test.cc
                    encryption/read_configurations_test.cc
